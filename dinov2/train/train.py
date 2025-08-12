@@ -25,6 +25,10 @@ from dinov2.utils.utils import CosineScheduler
 from dinov2.train.ssl_meta_arch import SSLMetaArch
 from dinov2.utils.train_lora_util import is_merged, activate_lora, deactivate_lora, delete_qkv
 
+import sys
+sys.path.append('/home/nikola.jovisic.ivi/nj/explora-mammo/dinov2')
+from mammo_datasets import MammoDataset, UnifiedDataset
+
 
 torch.backends.cuda.matmul.allow_tf32 = True  # PyTorch 1.12 sets this to False by default
 logger = logging.getLogger("dinov2")
@@ -65,7 +69,7 @@ For python-based LazyConfig, use "path.key=value".
         default="./wandb",
         help="Where the wandb log info is stored. Warning: takes a lot of space fast",
     )
-    parser.add_argument("--wandb_entity", type=str, default="FILL IN", help="Wandb entity name")
+    parser.add_argument("--wandb_entity", type=str, default="ivi-cvrs", help="Wandb entity name")
 
     parser.add_argument("--load_weights", default="", help="pretrain from checkpoint (possibly other domain)")
 
@@ -272,14 +276,6 @@ def do_train(cfg, model, resume=False):
         max_num_patches=mask_ratio_min_max[-1] * img_size // patch_size * img_size // patch_size,
     )
 
-    data_transform = DataAugmentationDINO(
-        cfg.crops.global_crops_scale,
-        cfg.crops.local_crops_scale,
-        cfg.crops.local_crops_number,
-        global_crops_size=cfg.crops.global_crops_size,
-        local_crops_size=cfg.crops.local_crops_size,
-    )
-
     collate_fn = partial(
         collate_data_and_cast,
         mask_ratio_tuple=cfg.ibot.mask_ratio_min_max,
@@ -291,11 +287,16 @@ def do_train(cfg, model, resume=False):
 
     # setup data loader
 
-    dataset = make_dataset(
-        dataset_str=cfg.train.dataset_path,
-        transform=data_transform,
-        target_transform=lambda _: (),
-    )
+    transform = DataAugmentationDINO(global_crops_scale=(0.5, 1.0), 
+                                     local_crops_scale=(0.01, 0.35), 
+                                     local_crops_number=8)
+
+    dataset = UnifiedDataset([MammoDataset(transform=transform, split='train'), 
+                         MammoDataset(transform=transform, split='valid'), 
+                         MammoDataset(transform=transform, split='train', labels=[3, 4, 5, 6]), 
+                         MammoDataset(transform=transform, split='valid', labels=[3, 4, 5, 6])],
+                         cycles=[1, 1, 4, 4])
+    
     # sampler_type = SamplerType.INFINITE
     sampler_type = SamplerType.SHARDED_INFINITE
     data_loader = make_data_loader(

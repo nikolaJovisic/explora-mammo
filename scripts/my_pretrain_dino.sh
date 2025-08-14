@@ -9,11 +9,9 @@ export WANDB_ENTITY=ivi-cvrs
 export WANDB_PROJECT=explora-mammo
 export PYTHONPATH=.
 
-#"$ENV/bin/wandb" login --relogin "$WANDB_API_KEY"
-
-num_gpus=2
+num_gpus=6
 cfg_file="dinov2/configs/train/fmow_vitb14.yaml"
-out_dir="logs"
+out_dir="/lustre/nj/explora"
 
 "$ENV/bin/torchrun" --nproc_per_node=$num_gpus  dinov2/train/train.py \
   --wandb=$WANDB_PROJECT \

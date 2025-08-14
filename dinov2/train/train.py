@@ -412,7 +412,7 @@ def do_train(cfg, model, resume=False):
         # checkpointing and testing
 
         # Possibly save checkpoints
-        if cfg.evaluation.eval_period_iterations > 0 and (iteration + 1) % cfg.evaluation.eval_period_iterations == 0:
+        if iteration % periodic_checkpointer.period == 0:
             # Merge lora weights before saving the teacher model
             if use_lora and cfg.lora.rank > 0 and distributed.is_main_process():
                 torch.cuda.synchronize()

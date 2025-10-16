@@ -5,17 +5,88 @@ import numpy as np
 from PIL import Image
 import random
 from torchvision.transforms.functional import crop, resize
+from torch.utils.data import Dataset
+import cv2
+from PIL import ImageFilter
+import torchvision.transforms.functional as F
 
 logger = logging.getLogger("dinov2")
 
-class AddGaussianNoise:
-    def __init__(self, mean=0., std=0.01):
-        self.mean = mean
-        self.std = std
 
-    def __call__(self, tensor):
-        return tensor + torch.randn_like(tensor) * self.std + self.mean
+class RandomGammaCorrection:
+    def __init__(self, gamma_range=(0.7, 1.5), p=0.5):
+        self.gamma_range = gamma_range
+        self.p = p
 
+    def __call__(self, img):
+        if random.random() < self.p:
+            gamma = random.uniform(*self.gamma_range)
+            return F.adjust_gamma(img, gamma)
+        return img
+
+class RandomGaussianBlur:
+    def __init__(self, sigma=(0.1, 0.3), p=0.3):
+        self.sigma = sigma
+        self.p = p
+
+    def __call__(self, img):
+        if random.random() < self.p:
+            sigma = random.uniform(*self.sigma)
+            return img.filter(ImageFilter.GaussianBlur(radius=sigma))
+        return img
+        
+class RandomGaussianNoise:
+    def __init__(self, std_range=(0.01, 0.03), p=0.3):
+        self.std_range = std_range
+        self.p = p
+
+    def __call__(self, img):
+        if random.random() < self.p:
+            img_np = np.array(img).astype(np.float32) / 255.0
+            std = random.uniform(*self.std_range)
+            # Create single-channel noise and broadcast it across all channels
+            noise = np.random.normal(0, std, img_np.shape[:2])
+            noise = np.repeat(noise[:, :, np.newaxis], img_np.shape[2], axis=2)
+            noisy = np.clip(img_np + noise, 0, 1)
+            return Image.fromarray((noisy * 255).astype(np.uint8))
+        return img
+
+class RandomElasticDeformation:
+    def __init__(self, alpha=(5, 15), sigma=(3, 6), grid_size=(16, 32), p=1.0):
+        self.alpha = alpha
+        self.sigma = sigma
+        self.grid_size = grid_size
+        self.p = p
+
+    def __call__(self, img):
+        if random.random() >= self.p:
+            return img
+
+        # sample random parameters
+        alpha = random.uniform(*self.alpha)
+        sigma = random.uniform(*self.sigma)
+        grid_size = int(random.uniform(*self.grid_size))
+
+        img_np = np.array(img)
+        shape = img_np.shape[:2]
+
+        # downsample displacement field
+        small_shape = (shape[0] // grid_size, shape[1] // grid_size)
+        dx_small = np.random.rand(*small_shape) * 2 - 1
+        dy_small = np.random.rand(*small_shape) * 2 - 1
+
+        # upsample to full resolution and blur
+        dx = cv2.resize(dx_small, (shape[1], shape[0]), interpolation=cv2.INTER_CUBIC)
+        dy = cv2.resize(dy_small, (shape[1], shape[0]), interpolation=cv2.INTER_CUBIC)
+        dx = cv2.GaussianBlur(dx, (0, 0), sigma) * alpha
+        dy = cv2.GaussianBlur(dy, (0, 0), sigma) * alpha
+
+        x, y = np.meshgrid(np.arange(shape[1]), np.arange(shape[0]))
+        map_x = (x + dx).astype(np.float32)
+        map_y = (y + dy).astype(np.float32)
+
+        warped = cv2.remap(img_np, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        return Image.fromarray(warped)
 
 class GrayscaleToRGBTransform:
     def __call__(self, img):
@@ -64,8 +135,6 @@ class CustomRandomCrop:
 
         return resize(img, self.size, interpolation=self.interpolation)
 
-
-
 class DataAugmentationDINO(object):
     def __init__(
         self,
@@ -91,23 +160,30 @@ class DataAugmentationDINO(object):
         logger.info(f"local_crops_size: {local_crops_size}")
         logger.info("###################################")
 
-        self.geometric_augmentation_global = transforms.Compose(
-            [
-                CustomRandomCrop(global_crops_size, scale=global_crops_scale),
-                transforms.RandomRotation(degrees=15),
-                transforms.RandomHorizontalFlip(p=0.5),
-                transforms.RandomVerticalFlip(p=0.5),
-            ]
-        )
 
-        self.geometric_augmentation_local = transforms.Compose(
-            [
-                CustomRandomCrop(local_crops_size, scale=local_crops_scale),
-                RandomRightAngleRotation(),
-                transforms.RandomHorizontalFlip(p=0.5),
-                transforms.RandomVerticalFlip(p=0.5),
-            ]
-        )
+        self.intensity_augmentation = transforms.Compose([
+            RandomGammaCorrection(p=0.5),
+            RandomGaussianBlur(p=0.3),
+            RandomGaussianNoise(p=0.3),
+        ])
+
+
+        self.geometric_augmentation_global = transforms.Compose([
+            CustomRandomCrop(global_crops_size, scale=global_crops_scale),
+            transforms.RandomRotation(degrees=15),
+            RandomElasticDeformation(alpha=(1, 2), sigma=(6, 10), grid_size=(48, 96), p=0.5),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomVerticalFlip(p=0.5),
+        ])
+
+        self.geometric_augmentation_local = transforms.Compose([
+            CustomRandomCrop(local_crops_size, scale=local_crops_scale),
+            RandomRightAngleRotation(),
+            RandomElasticDeformation(alpha=(0.5, 1.5), sigma=(2, 4), grid_size=(8, 24), p=0.5),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomVerticalFlip(p=0.5),
+        ])
+
 
         global_transfo2_extra = transforms.Compose(
             [
@@ -124,28 +200,40 @@ class DataAugmentationDINO(object):
 
         self.to_rgb = GrayscaleToRGBTransform()
 
-        self.global_transfo1 = transforms.Compose([self.to_rgb, self.normalize])
-        self.global_transfo2 = transforms.Compose([self.to_rgb, global_transfo2_extra, self.normalize])
-        self.local_transfo = transforms.Compose([self.to_rgb, self.normalize])
+        self.global_transfo1 = transforms.Compose([self.to_rgb, self.intensity_augmentation, self.normalize])
+        self.global_transfo2 = transforms.Compose([self.to_rgb, self.intensity_augmentation, global_transfo2_extra, self.normalize])
+        self.local_transfo = transforms.Compose([self.to_rgb, self.intensity_augmentation, self.normalize])
 
-    def __call__(self, image):
-        image = image.convert("L")
-
+    def __call__(self, images):
         output = {}
 
-        im1_base = self.geometric_augmentation_global(image)
+        im1_base = self.geometric_augmentation_global(random.choice(images))
         global_crop_1 = self.global_transfo1(im1_base)
 
-        im2_base = self.geometric_augmentation_global(image)
+        im2_base = self.geometric_augmentation_global(random.choice(images))
         global_crop_2 = self.global_transfo2(im2_base)
 
         output["global_crops"] = [global_crop_1, global_crop_2]
         output["global_crops_teacher"] = [global_crop_1, global_crop_2]
 
         local_crops = [
-            self.local_transfo(self.geometric_augmentation_local(image)) for _ in range(self.local_crops_number)
+            self.local_transfo(self.geometric_augmentation_local(random.choice(images))) for _ in range(self.local_crops_number)
         ]
         output["local_crops"] = local_crops
         output["offsets"] = ()
 
         return output, None
+
+
+
+class TransformedDataset(Dataset):
+    def __init__(self, dataset, transform):
+        self.dataset = dataset
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        x, _ = self.dataset[idx]
+        return self.transform(x)

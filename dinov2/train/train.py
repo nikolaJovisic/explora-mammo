@@ -15,7 +15,7 @@ from fvcore.common.checkpoint import PeriodicCheckpointer
 import torch
 
 from dinov2.data import SamplerType, make_data_loader, make_dataset
-from dinov2.data import collate_data_and_cast, DataAugmentationDINO, MaskingGenerator
+from dinov2.data import collate_data_and_cast, DataAugmentationDINO, MaskingGenerator, TransformedDataset  
 import dinov2.distributed as distributed
 from dinov2.fsdp import FSDPCheckpointer
 from dinov2.logging import MetricLogger
@@ -291,11 +291,8 @@ def do_train(cfg, model, resume=False):
                                      local_crops_scale=(0.01, 0.35), 
                                      local_crops_number=8)
 
-    dataset = UnifiedDataset([MammoDataset(transform=transform, split='train'), 
-                         MammoDataset(transform=transform, split='valid'), 
-                         MammoDataset(transform=transform, split='train', labels=[3, 4, 5, 6]), 
-                         MammoDataset(transform=transform, split='valid', labels=[3, 4, 5, 6])],
-                         cycles=[1, 1, 4, 4])
+    dataset = MammoDataset(return_mode=ReturnMode.BREAST_LABEL, convert_to=ConvertTo.PIL, drop_no_label=False, split='train')
+    dataset = TransformedDataset(dataset, transform)
     
     # sampler_type = SamplerType.INFINITE
     sampler_type = SamplerType.SHARDED_INFINITE
